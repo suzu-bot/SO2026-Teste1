@@ -108,7 +108,7 @@ sanitize_field() {
 }
 
 is_iso_date() {
-    printf '%s\n' "$1" | grep -Eq '^[0-9]{4}-[0-9]{2}-[0-9]{2}$'
+    printf '%s\n' "$1" | grep -Eq '^[0-9]{4}-(0[1-9]|1[0-2])-(0[1-9]|[12][0-9]|3[01])$'
 }
 
 is_prio() {
@@ -149,8 +149,11 @@ next_todo_id() {
 add_problem() {
     case ",$PROBLEMS," in
         *,"$1",*) ;;
-        *,) PROBLEMS=$1 ;;
-        *) PROBLEMS=$PROBLEMS,$1 ;;
+        *) if [ -z "$PROBLEMS" ]; then
+               PROBLEMS=$1
+           else
+               PROBLEMS=$PROBLEMS,$1
+           fi ;;
     esac
 }
 
@@ -217,8 +220,9 @@ flatten_single_subdir() {
     [ "$count" -eq 1 ] || return 0
     only=$(find "$dest" -mindepth 1 -maxdepth 1 -type d)
     [ -n "$only" ] || return 0
-    find "$only" -mindepth 1 -maxdepth 1 -exec mv {} "$dest"/ \;
-    rmdir "$only" 2>/dev/null || :
+    # mover todo o conteudo da subpasta para dest, incluindo ficheiros ocultos
+    find "$only" -mindepth 1 -maxdepth 1 -exec mv {} "$dest"/ \; 2>/dev/null
+    rmdir "$only" 2>/dev/null || rm -rf "$only" 2>/dev/null || :
 }
 
 append_report_line() {
@@ -250,12 +254,12 @@ extract_or_store_archive() {
             if has_extract_tool zip; then
                 unzip -qq "$src" -d "$dest" || return 1
                 flatten_single_subdir "$dest"
-                [ "$mode" = "move" ] && rm -f "$src"
+                if [ "$mode" = "move" ]; then rm -f "$src"; fi
             else
                 if [ "$mode" = "move" ]; then
-                    mv "$src" "$dest"/
+                    mv "$src" "$dest"/ || return 1
                 else
-                    cp "$src" "$dest"/
+                    cp "$src" "$dest"/ || return 1
                 fi
             fi
             ;;
@@ -263,12 +267,12 @@ extract_or_store_archive() {
             if has_extract_tool targz; then
                 tar -xzf "$src" -C "$dest" || return 1
                 flatten_single_subdir "$dest"
-                [ "$mode" = "move" ] && rm -f "$src"
+                if [ "$mode" = "move" ]; then rm -f "$src"; fi
             else
                 if [ "$mode" = "move" ]; then
-                    mv "$src" "$dest"/
+                    mv "$src" "$dest"/ || return 1
                 else
-                    cp "$src" "$dest"/
+                    cp "$src" "$dest"/ || return 1
                 fi
             fi
             ;;
@@ -276,12 +280,12 @@ extract_or_store_archive() {
             if has_extract_tool tar; then
                 tar -xf "$src" -C "$dest" || return 1
                 flatten_single_subdir "$dest"
-                [ "$mode" = "move" ] && rm -f "$src"
+                if [ "$mode" = "move" ]; then rm -f "$src"; fi
             else
                 if [ "$mode" = "move" ]; then
-                    mv "$src" "$dest"/
+                    mv "$src" "$dest"/ || return 1
                 else
-                    cp "$src" "$dest"/
+                    cp "$src" "$dest"/ || return 1
                 fi
             fi
             ;;
@@ -289,11 +293,14 @@ extract_or_store_archive() {
             return 1
             ;;
     esac
+    return 0
 }
 
 append_superseded_lines() {
     repo_dir=$1
     report_file=$2
+    tmpsuper="$STATE/superseded.$$"
+
     list_submission_dirs "$repo_dir" |
     awk -F/ '
     {
@@ -312,11 +319,13 @@ append_superseded_lines() {
         }
         prev_key=key
         prev_path=$5
-    }' |
+    }' > "$tmpsuper" 2>/dev/null
+
     while IFS= read -r oldpath; do
         [ -n "$oldpath" ] || continue
         append_report_line "$report_file" "SUPERSEDED;$oldpath;entrega_mais_recente_existe"
-    done
+    done < "$tmpsuper"
+    rm -f "$tmpsuper"
 }
 
 ensure_failure_todo() {
@@ -465,12 +474,16 @@ build_check_report() {
     repo_dir=$1
     report_out=$2
     create_todos=$3
+    tmplist="$STATE/check_list.$$"
 
     : > "$report_out" || die "Erro a escrever em $report_out"
 
-    list_submission_dirs "$repo_dir" | while IFS= read -r dir; do
+    list_submission_dirs "$repo_dir" > "$tmplist" 2>/dev/null
+
+    while IFS= read -r dir; do
         build_check_line "$dir" "$create_todos" >> "$report_out"
-    done
+    done < "$tmplist"
+    rm -f "$tmplist"
 }
 
 cmd_todo_add() {
@@ -709,6 +722,7 @@ cmd_handin_ingest() {
     [ -w "$repo_dir" ] || die "Sem permissao de escrita em repo_dir"
 
     report="$RUNS/ingest_$(now_run_id).txt"
+    tmplist="$STATE/ingest_list.$$"
 
     acquire_lock
     : > "$report" || {
@@ -716,7 +730,9 @@ cmd_handin_ingest() {
         die "Erro a criar relatorio"
     }
 
-    find "$inbox_dir" -mindepth 1 -maxdepth 1 \( -type d -o -type f \) | while IFS= read -r src; do
+    find "$inbox_dir" -mindepth 1 -maxdepth 1 \( -type d -o -type f \) > "$tmplist" 2>/dev/null
+
+    while IFS= read -r src; do
         base=$(basename "$src")
         kind=
         subname=
@@ -772,7 +788,8 @@ cmd_handin_ingest() {
                 append_report_line "$report" "FAIL;$src;erro_a_importar_arquivo"
             fi
         fi
-    done
+    done < "$tmplist"
+    rm -f "$tmplist"
 
     append_superseded_lines "$repo_dir" "$report"
     release_lock
